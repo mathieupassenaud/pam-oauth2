@@ -16,8 +16,8 @@ $ sudo make install
 ## Configuration
 
 ```
-auth sufficient pam_oauth2.so <tokeninfo url> <login field> key1=value2 key2=value2
-account sufficient pam_oauth2.so <tokeninfo url> <login field> key1=value2 key2=value2
+auth sufficient pam_oauth2.so <tokeninfo url> <tokenrevoke url> <login field> key1=value2 key2=value2
+account sufficient pam_oauth2.so <tokeninfo url> <tokenrevoke url> <login field> key1=value2 key2=value2
 ```
 
 ## How it works
@@ -25,12 +25,12 @@ account sufficient pam_oauth2.so <tokeninfo url> <login field> key1=value2 key2=
 Lets assume that configuration is looking like:
 
 ```
-auth sufficient pam_oauth2.so https://foo.org/oauth2/tokeninfo?access_token= uid grp=tester
+auth sufficient pam_oauth2.so https://foo.org/oauth2/tokeninfo?access_token= https://foo.org/oauth2/revoke?access\_token=bar uid grp=tester
 ```
 
 And somebody is trying to login with login=foo and token=bar.
 
-pam\_oauth2 module will make http request https://foo.org/oauth2/tokeninfo?access\_token=bar (tokeninfo url is simply concatenated with token) and check response code and content.
+pam\_oauth2 module will make http request https://foo.org/oauth2/tokeninfo?access\_token=bar (tokeninfo url is simply concatenated with token) and check response code and content. After, it revoke the token with an httm request to https://foo.org/oauth2/revoke?access\_token=bar
 
 If the response code is not 200 - authentication will fail. After that it will check response content:
 

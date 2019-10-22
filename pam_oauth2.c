@@ -130,6 +130,42 @@ static int check_response(const struct response token_info, struct check_tokens 
     return r;
 }
 
+static int query_token_revoke(const char * const tokenrevoke_url, const char * const authtok, long *response_code, struct response *token_info) {
+    int ret = 1;
+    char *url;
+    CURL *session = curl_easy_init();
+
+    if (!session) {
+        syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: revoke : can't initialize curl");
+        return ret;
+    }
+
+    if ((url = malloc(strlen(tokenrevoke_url) + strlen(authtok) + 1))) {
+        strcpy(url, tokenrevoke_url);
+        strcat(url, authtok);
+
+        curl_easy_setopt(session, CURLOPT_URL, url);
+        curl_easy_setopt(session, CURLOPT_WRITEFUNCTION, writefunc);
+        curl_easy_setopt(session, CURLOPT_WRITEDATA, token_info);
+
+
+        if (curl_easy_perform(session) == CURLE_OK &&
+                curl_easy_getinfo(session, CURLINFO_RESPONSE_CODE, response_code) == CURLE_OK) {
+            ret = 0;
+        } else {
+            syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: revoke : failed to perform curl request");
+        }
+ 
+        free(url);
+    } else {
+        syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: revoke : memory allocation failed");
+    }
+
+    curl_easy_cleanup(session);
+
+    return ret;
+}
+
 static int query_token_info(const char * const tokeninfo_url, const char * const authtok, long *response_code, struct response *token_info) {
     int ret = 1;
     char *url;
@@ -165,9 +201,10 @@ static int query_token_info(const char * const tokeninfo_url, const char * const
     return ret;
 }
 
-static int oauth2_authenticate(const char * const tokeninfo_url, const char * const authtok, struct check_tokens *ct) {
+static int oauth2_authenticate(const char * const tokeninfo_url, const char * const tokenrevoke_url, const char * const authtok, struct check_tokens *ct) {
     struct response token_info;
     long response_code = 0;
+    long response_revoke_code = 0;
     int ret;
 
     if ((token_info.ptr = malloc(1)) == NULL) {
@@ -179,7 +216,9 @@ static int oauth2_authenticate(const char * const tokeninfo_url, const char * co
     if (query_token_info(tokeninfo_url, authtok, &response_code, &token_info) != 0) {
         ret = PAM_AUTHINFO_UNAVAIL;
     } else if (response_code == 200) {
+/*        query_token_revoke(tokenrevoke_url, authtok, &response_revoke_code);*/
         ret = check_response(token_info, ct);
+ query_token_revoke(tokenrevoke_url, authtok, &response_revoke_code, &token_info);
     } else {
         syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: authentication failed with response_code=%li", response_code);
         ret = PAM_AUTH_ERR;
@@ -191,16 +230,22 @@ static int oauth2_authenticate(const char * const tokeninfo_url, const char * co
 }
 
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) {
-    const char *tokeninfo_url = NULL, *authtok = NULL;
+    const char *tokeninfo_url = NULL, *tokenrevoke_url = NULL, *authtok = NULL;
     struct check_tokens ct[argc];
     int i, ct_len = 1;
     ct->key = ct->value = NULL;
 
     if (argc > 0) tokeninfo_url = argv[0];
-    if (argc > 1) ct[0].key = argv[1];
+    if (argc > 1) tokenrevoke_url = argv[1];
+    if (argc > 2) ct[0].key = argv[2];
 
     if (tokeninfo_url == NULL || *tokeninfo_url == '\0') {
         syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: tokeninfo_url is not defined or invalid");
+        return PAM_AUTHINFO_UNAVAIL;
+    }
+
+    if (tokeninfo_url == NULL || *tokenrevoke_url == '\0') {
+        syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: tokenrevoke_url is not defined or invalid");
         return PAM_AUTHINFO_UNAVAIL;
     }
 
@@ -223,7 +268,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     ct->value_len = strlen(ct->value);
     ct->match = 0;
 
-    for (i = 2; i < argc; ++i) {
+    for (i = 3; i < argc; ++i) {
         const char *value = strchr(argv[i], '=');
         if (value != NULL) {
             ct[ct_len].key = argv[i];
@@ -235,7 +280,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
     ct[ct_len].key = NULL;
 
-    return oauth2_authenticate(tokeninfo_url, authtok, ct);
+    return oauth2_authenticate(tokeninfo_url, tokenrevoke_url, authtok, ct);
 }
 
 PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const char **argv) {
