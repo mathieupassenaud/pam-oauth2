@@ -25,12 +25,14 @@ account sufficient pam_oauth2.so <tokeninfo url> <login field> key1=value2 key2=
 Lets assume that configuration is looking like:
 
 ```
-auth sufficient pam_oauth2.so https://foo.org/oauth2/tokeninfo?access_token= uid grp=tester
+auth sufficient pam_oauth2.so https://foo.org/oauth2/tokeninfo?access_token= controllerId uid grp=tester
 ```
 
 And somebody is trying to login with login=foo and token=bar.
 
 pam\_oauth2 module will make http request https://foo.org/oauth2/tokeninfo?access\_token=bar (tokeninfo url is simply concatenated with token) and check response code and content.
+
+It verifies authorizations on [please-open.it](https://please-open.it) using the `controllerId`
 
 If the response code is not 200 - authentication will fail. After that it will check response content:
 

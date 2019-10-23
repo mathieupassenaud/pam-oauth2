@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <syslog.h>
 #include <curl/curl.h>
@@ -154,7 +155,7 @@ static int query_token_info(const char * const tokeninfo_url, const char * const
         } else {
             syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: failed to perform curl request");
         }
- 
+
         free(url);
     } else {
         syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: memory allocation failed");
@@ -164,6 +165,99 @@ static int query_token_info(const char * const tokeninfo_url, const char * const
 
     return ret;
 }
+
+static int query_token_exchange(const char * const tokenexchange_url, const char * const authtok, long *response_code, struct response *token_info) {
+    int ret = 1;
+    char *postData;
+    struct curl_slist *headers = NULL;
+
+    if ((postData = malloc(strlen("{\"provider\": \"google\", \"token\": \"") + strlen(authtok) + strlen("\"}")+1))){
+        strcpy(postData, "{\"provider\": \"google\", \"token\": \"");
+        strcat(postData, authtok);
+        strcat(postData, "\"}");
+    }else{
+        syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: token exchange : memory allocation failed");
+        return ret;
+    }
+
+    CURL *session = curl_easy_init();
+
+    if (!session) {
+        syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: token exchange : can't initialize curl");
+        return ret;
+    }
+
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    curl_easy_setopt(session, CURLOPT_URL, tokenexchange_url);
+    curl_easy_setopt(session, CURLOPT_WRITEFUNCTION, writefunc);
+    curl_easy_setopt(session, CURLOPT_WRITEDATA, token_info);
+    curl_easy_setopt(session, CURLOPT_POSTFIELDS, postData);
+    curl_easy_setopt(session, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(session, CURLOPT_CUSTOMREQUEST, "POST");
+
+    if (curl_easy_perform(session) == CURLE_OK &&
+            curl_easy_getinfo(session, CURLINFO_RESPONSE_CODE, response_code) == CURLE_OK) {
+        ret = 0;
+    } else {
+        syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: token exchange : failed to perform curl request");
+    }
+    curl_easy_cleanup(session);
+    free(postData);
+    return ret;
+}
+
+static int query_authorization_url(const char * const authorization_url, const char * const token, const char * const controller_id, long * response_code, struct response *token_info){
+    int ret = 1;
+    struct curl_slist *headers = NULL;
+    char *authorization_header;
+    char *controllerId_header;
+
+    if ((authorization_header = malloc(strlen("Authorization: ") + strlen(token) +1))){
+        strcpy(authorization_header, "Authorization: ");
+        strcat(authorization_header, token);
+    }else{
+        syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: authorization : memory allocation failed");
+        return ret;
+    }
+
+    if ((controllerId_header = malloc(strlen("Authorization: ") + strlen(controller_id) +1))){
+        strcpy(controllerId_header, "controllerId: ");
+        strcat(controllerId_header, controller_id);
+    }else{
+        syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: authorization : memory allocation failed");
+        return ret;
+    }
+
+    CURL *session = curl_easy_init();
+
+    if (!session) {
+        syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: authorization : can't initialize curl");
+        return ret;
+    }
+
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, authorization_header);
+    headers = curl_slist_append(headers, controllerId_header);
+
+    curl_easy_setopt(session, CURLOPT_URL, authorization_url);
+    curl_easy_setopt(session, CURLOPT_WRITEFUNCTION, writefunc);
+    curl_easy_setopt(session, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(session, CURLOPT_WRITEDATA, token_info);
+
+    if (curl_easy_perform(session) == CURLE_OK &&
+            curl_easy_getinfo(session, CURLINFO_RESPONSE_CODE, response_code) == CURLE_OK) {
+
+        ret = 0;
+    } else {
+        syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: authorization : failed to perform curl request");
+    }
+    curl_easy_cleanup(session);
+    free(authorization_header);
+    free(controllerId_header);
+    return ret;
+}
+
 
 static int oauth2_authenticate(const char * const tokeninfo_url, const char * const authtok, struct check_tokens *ct) {
     struct response token_info;
@@ -190,17 +284,57 @@ static int oauth2_authenticate(const char * const tokeninfo_url, const char * co
     return ret;
 }
 
+static int check_authorization(const char * const authtok, const char * const controllerId){
+    struct response token_info;
+    long response_code = 0;
+    int ret;
+
+    if ((token_info.ptr = malloc(1)) == NULL) {
+        syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: memory allocation failed");
+        return PAM_AUTHINFO_UNAVAIL;
+    }
+    token_info.ptr[token_info.len = 0] = '\0';
+
+    if (query_token_exchange("https://access.please-open.it/login/fromToken", authtok, &response_code, &token_info) != 0) {
+        ret = PAM_AUTHINFO_UNAVAIL;
+    } else if (response_code == 200) {
+        query_authorization_url("https://access.please-open.it/access/", token_info.ptr, controllerId, &response_code, &token_info);
+        if(response_code == 200) {
+
+        }else{
+            syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: authorize : authentication failed with response_code=%li", response_code);
+            ret = PAM_AUTH_ERR;
+	}
+    } else {
+        syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: token exchange : authentication failed with response_code=%li", response_code);
+        ret = PAM_AUTH_ERR;
+    }
+
+    free(token_info.ptr);
+
+    return ret;
+
+}
+
+
+
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) {
-    const char *tokeninfo_url = NULL, *authtok = NULL;
+    const char *tokeninfo_url = NULL, *authtok = NULL, *controllerId = NULL;
     struct check_tokens ct[argc];
-    int i, ct_len = 1;
+    int i, ct_len = 1, auth_ret;
     ct->key = ct->value = NULL;
 
     if (argc > 0) tokeninfo_url = argv[0];
-    if (argc > 1) ct[0].key = argv[1];
+    if (argc > 1) controllerId = argv[1];
+    if (argc > 2) ct[0].key = argv[2];
 
     if (tokeninfo_url == NULL || *tokeninfo_url == '\0') {
         syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: tokeninfo_url is not defined or invalid");
+        return PAM_AUTHINFO_UNAVAIL;
+    }
+
+    if (controllerId == NULL || *controllerId == '\0') {
+        syslog(LOG_AUTH|LOG_DEBUG, "pam_oauth2: controllerId is not defined or invalid");
         return PAM_AUTHINFO_UNAVAIL;
     }
 
@@ -223,7 +357,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     ct->value_len = strlen(ct->value);
     ct->match = 0;
 
-    for (i = 2; i < argc; ++i) {
+    for (i = 3; i < argc; ++i) {
         const char *value = strchr(argv[i], '=');
         if (value != NULL) {
             ct[ct_len].key = argv[i];
@@ -235,7 +369,10 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
     ct[ct_len].key = NULL;
 
-    return oauth2_authenticate(tokeninfo_url, authtok, ct);
+    if(oauth2_authenticate(tokeninfo_url, authtok, ct) == PAM_AUTH_ERR)
+        return PAM_AUTH_ERR;
+
+    return check_authorization(authtok, controllerId);
 }
 
 PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const char **argv) {
